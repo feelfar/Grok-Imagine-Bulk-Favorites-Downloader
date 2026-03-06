@@ -4,9 +4,20 @@ A Tampermonkey userscript that bulk-downloads all of your saved/favorited images
 
 ---
 
-## Step 1 — Configure Tampermonkey (Do This First)
+## Step 1 — Install Tampermonkey
 
-Before installing the script, you need to enable two settings in Tampermonkey. If you skip this the script will not work.
+First, install the Tampermonkey browser extension if you haven't already:
+
+- **Chrome** → [Install from Chrome Web Store](https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo)
+- **Firefox** → [Install from Firefox Add-ons](https://addons.mozilla.org/firefox/addon/tampermonkey/)
+- **Edge** → [Install from Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd)
+- **Safari** → [Install from App Store](https://www.tampermonkey.net/?browser=safari)
+
+---
+
+## Step 2 — Configure Tampermonkey (Do This Before Installing the Script)
+
+After installing Tampermonkey, you need to enable two settings or the script will not work.
 
 1. Go to `chrome://extensions` in your address bar
 2. Find **Tampermonkey** and click **Details**
@@ -46,12 +57,10 @@ Once both settings are enabled, proceed to installation below.
 
 ---
 
-## Installation
+## Step 3 — Installation
 
-1. Complete **Step 1** above first
-2. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser if you haven't already
-3. Click the downloaded `grok-imagine-bulk-favorites-downloader-v14.user.js` file — Tampermonkey should automatically prompt you to install it
-4. Alternatively, open the Tampermonkey dashboard → click **Create new script** → paste the entire script contents → save
+1. Click the downloaded `grok-imagine-bulk-favorites-downloader-v14.user.js` file — Tampermonkey should automatically prompt you to install it
+2. Alternatively, open the Tampermonkey dashboard → click **Create new script** → paste the entire script contents → save
 
 ---
 
