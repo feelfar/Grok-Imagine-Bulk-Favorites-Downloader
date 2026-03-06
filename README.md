@@ -4,14 +4,35 @@ A Tampermonkey userscript that bulk-downloads all of your saved/favorited images
 
 ---
 
+## Step 1 — Configure Tampermonkey (Do This First)
+
+Before installing the script, you need to enable two settings in Tampermonkey. If you skip this the script will not work.
+
+1. Go to `chrome://extensions` in your address bar
+2. Find **Tampermonkey** and click **Details**
+3. Scroll down and turn on **"Allow User Scripts"**
+
+> This allows Tampermonkey to run scripts that have not been reviewed by Google. You should only enable this if you trust the script you are installing.
+
+4. On the same page, also turn on **"Allow in Incognito"** if you want the script to work in private/incognito windows
+
+> Without this the script will only run in normal browser windows.
+
+Once both settings are enabled, proceed to installation below.
+
+---
+
 ## Features
 
 - **Bulk downloads all favorites** — no limit, grabs everything
+- **Smart early stopping** — since Grok returns favorites newest-first, stops paginating as soon as it hits a full page of already-downloaded items
 - **Chunked downloading** — downloads in batches of 200, pausing between each so your browser doesn't get overwhelmed
 - **Download history** — remembers every downloaded file by ID so repeat runs only fetch new favorites
-- **Save IDs only mode** — mark your current favorites as "already have" without downloading any files (useful for setting a baseline)
+- **Media type filter** — choose to download images only, videos only, or both
+- **Page limit option** — optionally limit how many pages to fetch (each page = 40 items) so you don't have to download everything
+- **Save IDs only mode** — mark your current favorites as "already have" without downloading any files
 - **Re-download everything mode** — ignore history and grab everything fresh
-- **No page interference** — does not patch `window.fetch` so Grok's own page loads and favorites grid work normally
+- **No page interference** — uses `GM_xmlhttpRequest` so Grok's own page loads normally
 - **Works with images and videos** — downloads `.jpg`, `.png`, `.webp`, and `.mp4` files
 - **Smart filenames** — files are named `YYYY-MM-DD_HHMM_ID_model_prompt.ext` so they're easy to sort and search
 - **Persistent history** — download history survives page reloads and browser restarts via Tampermonkey storage
@@ -27,9 +48,10 @@ A Tampermonkey userscript that bulk-downloads all of your saved/favorited images
 
 ## Installation
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser if you haven't already
-2. Click the downloaded `grok-imagine-bulk-download.user.js` file — Tampermonkey should automatically prompt you to install it
-3. Alternatively, open the Tampermonkey dashboard → click **Create new script** → paste the entire script contents → save
+1. Complete **Step 1** above first
+2. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser if you haven't already
+3. Click the downloaded `grok-imagine-bulk-favorites-downloader-v14.user.js` file — Tampermonkey should automatically prompt you to install it
+4. Alternatively, open the Tampermonkey dashboard → click **Create new script** → paste the entire script contents → save
 
 ---
 
@@ -47,6 +69,13 @@ A Tampermonkey userscript that bulk-downloads all of your saved/favorited images
 | **⬇ Download new favorites** | Fetches all favorites, skips ones already downloaded, downloads the rest in chunks of 200 |
 | **🔖 Save IDs only (no download)** | Marks all current favorites as "already have" without downloading any files |
 | **⬇ Download everything (ignore history)** | Re-downloads all favorites regardless of history |
+
+### Modal Settings
+
+| Setting | What it does |
+|---|---|
+| **Max pages to fetch** | Leave blank for unlimited, or type a number to stop after that many pages (1 page = 40 items) |
+| **Media type** | Choose Images & Videos, Images only, or Videos only |
 
 5. Files are saved to your browser's default **Downloads** folder under a `grok-favorites/` subfolder
 
@@ -67,16 +96,16 @@ Body: { limit: 40, filter: { source: "MEDIA_POST_SOURCE_LIKED" }, cursor: "..." 
 This is the same endpoint Grok's own website uses to load your favorites. Because the script runs inside your logged-in browser session, your session cookies are sent automatically — no API key or login needed.
 
 ### Pagination
-The API returns 40 items per page along with a `nextCursor` token. The script keeps calling the API with the cursor from each response until no cursor is returned, meaning all pages have been fetched. There is no limit on how many pages it will fetch.
+The API returns 40 items per page along with a `nextCursor` token. The script keeps calling the API with the cursor from each response until no cursor is returned. Since Grok returns favorites newest-first, the script also stops early if it hits a full page where every item is already in your download history.
 
 ### Chunked Downloading
-Once all favorites are collected, they are split into chunks of 200 and downloaded sequentially. After each chunk finishes being queued, the script pauses for 5 seconds to give the browser time to process the downloads before starting the next chunk. This prevents the browser from being overwhelmed with hundreds of simultaneous download requests.
+Once all favorites are collected, they are split into chunks of 200 and downloaded sequentially. After each chunk finishes being queued, the script pauses for 5 seconds to give the browser time to process the downloads before starting the next chunk.
 
 ### Download History
 Every successfully queued file's ID is saved to Tampermonkey's persistent storage (`GM_setValue`). On future runs the script fetches the full favorites list from the API but filters out any IDs already in history before downloading. History is saved incrementally during downloading so if the browser crashes mid-run, already-queued files won't be re-downloaded next time.
 
 ### No Page Interference
-Earlier versions of the script patched `window.fetch` to intercept auth tokens, which accidentally broke Grok's page loading. The current version uses `GM_xmlhttpRequest` instead — this runs in Tampermonkey's own isolated context and cannot interfere with the page's own network requests.
+The script uses `GM_xmlhttpRequest` which runs in Tampermonkey's own isolated context and cannot interfere with the page's own network requests.
 
 ---
 
@@ -93,8 +122,6 @@ For example:
 grok-favorites/2025-03-01_1430_a1b2c3d4_grok-2_a-cat-wearing-a-spacesuit.jpg
 ```
 
-This makes files easy to sort by date, search by prompt, and identify by model.
-
 ---
 
 ## Resetting Download History
@@ -105,14 +132,17 @@ If you want to re-download everything from scratch (e.g. you got a new computer,
 - Confirm the prompt
 - The next run will treat all favorites as new and download everything again
 
-Alternatively, you can select **"⬇ Download everything (ignore history)"** from the modal for a one-time full re-download without permanently clearing the history.
+Alternatively, select **"⬇ Download everything (ignore history)"** from the modal for a one-time full re-download without permanently clearing the history.
 
 ---
 
 ## Troubleshooting
 
 **Button doesn't appear**
-Make sure you are on `grok.com/imagine` or `grok.com/imagine/favorites`. The script only runs on those pages.
+Make sure "Allow User Scripts" is enabled in Tampermonkey's settings (see Step 1). Then refresh the page.
+
+**Script not running on the page**
+Go to `chrome://extensions` → Tampermonkey → Details and make sure "Allow User Scripts" is toggled on. Also try navigating directly to `https://grok.com/imagine/favorites` by typing it in the address bar rather than clicking through the site.
 
 **"API request failed" error**
 Make sure you are logged into grok.com. Try refreshing the page and clicking the button again.
