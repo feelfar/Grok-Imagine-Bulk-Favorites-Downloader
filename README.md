@@ -1,5 +1,7 @@
 # Grok Imagine – Bulk Favorites Downloader
 
+> 🙏 Special thanks to **Medicine-Tall** and **sb0rra_marc1ssima** for their feature suggestions and bug reports — your feedback directly shaped this script.
+
 A Tampermonkey userscript that bulk-downloads all of your saved/favorited images and videos from [grok.com/imagine](https://grok.com/imagine). It remembers what it has already downloaded so future runs only grab new ones.
 
 ---
