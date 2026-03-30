@@ -355,7 +355,6 @@
     if (justDownloaded.length) markDownloaded(history, justDownloaded);
     return done;
   }
-  
   // ── UI ────────────────────────────────────────────────────────────────────
   function buildUI() {
     if (document.getElementById('grokdl-v22')) return;
@@ -369,8 +368,7 @@
       fontFamily: 'system-ui, -apple-system, sans-serif',
     });
 
-    const log = document.createElement('div');
-    log.style.whiteSpace = 'pre-wrap';   // 重要：支持换行
+    const log = document.createElement('div');    
     Object.assign(log.style, {
       background: 'rgba(9,11,17,0.94)', color: '#cbd5e1',
       border: '1px solid rgba(255,255,255,0.11)', borderRadius: '10px',
@@ -413,10 +411,8 @@
 
     let _col = '#2563eb';
     const setColor  = c => { _col = c; btn.style.background = c; };
-    const setStatus = (msg) => {
-      log.innerHTML = msg;               // 使用 innerHTML 支持 <br>
-      console.log('[GrokDL]', msg.replace(/<br>/g, '\n'));
-    };
+const setStatus = msg => { log.textContent = msg; console.log('[GrokDL]', msg); };
+ };
 
     btn.onmouseenter = () => { if (!btn.disabled) btn.style.background = '#1d4ed8'; };
     btn.onmouseleave = () => { if (!btn.disabled) btn.style.background = _col; };
@@ -884,7 +880,7 @@ upscaleBtn.addEventListener('click', async () => {
       btn.disabled = true;
       log.style.display = 'block';
       upscaleBtn.textContent = '⏳ Upscaling...';
-      setStatus('正在扫描收藏夹中的视频...');
+      setStatus收集正在收集收藏夹中的视频...');
 
       try {
         const history = loadHistory();
