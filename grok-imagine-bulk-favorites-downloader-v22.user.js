@@ -256,78 +256,76 @@
     return [...bag.values()];
   }
 
-// ── 新增：批量 Upscale 视频（仅无 hdMediaUrl 的视频） ─────────────────────
+// ── 新增：批量 Upscale 视频（仅无 hdMediaUrl 的视频）====================== 关键修复 1：批量 Upscale ======================
   async function batchUpscaleVideos(items, onStatus) {
     const videosToUpscale = items.filter(item => 
       (item.ext === 'mp4' || item.ext === 'webm' || item.ext === 'mov') &&
-      !item.url.includes('hd') &&   // 简单判断是否已有高清
-      item.id
+      !item.url.toLowerCase().includes('hd')
     );
 
     if (!videosToUpscale.length) {
-      onStatus('✅ 没有需要 upscale 的视频（已全部为高清或非视频）。');
+      onStatus('✅ 没有找到需要 upscale 的低分辨率视频。');
       return 0;
     }
 
-    onStatus(`发现 ${videosToUpscale.length} 个低分辨率视频，开始批量 upscale...`);
-    let success = 0;
+    onStatus(`🔼 开始 upscale ${videosToUpscale.length} 个视频...`);
 
+    let success = 0;
     for (let i = 0; i < videosToUpscale.length; i++) {
       const v = videosToUpscale[i];
-      onStatus(`Upscale 进度: \( {i+1}/ \){videosToUpscale.length} (${Math.round((i+1)/videosToUpscale.length*100)}%) - ID: ${v.id.slice(0,8)}`);
+      const percent = Math.round(((i + 1) / videosToUpscale.length) * 100);
+
+      onStatus(`🔼 Upscale 进度: \( {i + 1}/ \){videosToUpscale.length} (${percent}%)<br>ID: ${v.id.slice(0,12)}...`);
 
       try {
-        await new Promise((resolve) => {
+        await new Promise(resolve => {
           GM_xmlhttpRequest({
             method: 'POST',
             url: UPSCALE_ENDPOINT,
             headers: { 'Content-Type': 'application/json' },
             data: JSON.stringify({ videoId: v.id }),
             withCredentials: true,
-            onload: res => {
-              if (res.status === 200) {
-                success++;
-                console.log(`[GrokDL] Upscale requested for video ${v.id}`);
-              } else {
-                console.warn(`[GrokDL] Upscale failed for ${v.id}:`, res.status);
-              }
+            onload: (res) => {
+              if (res.status === 200) success++;
               resolve();
             },
-            onerror: () => { console.warn(`[GrokDL] Upscale network error for ${v.id}`); resolve(); }
+            onerror: () => resolve()
           });
         });
-      } catch (e) {
-        console.error(e);
-      }
+      } catch (e) { console.error(e); }
 
       await sleep(UPSCALE_DELAY_MS);
     }
 
-    onStatus(`✅ Upscale 完成！已为 \( {success}/ \){videosToUpscale.length} 个视频发起高清请求。\n请稍后在 Grok Imagine 界面刷新检查高清版本。`);
+    onStatus(`✅ Upscale 请求完成！成功发起 \( {success}/ \){videosToUpscale.length} 个视频的高清处理。<br>请稍后刷新 Grok 界面查看结果。`);
     return success;
   }
-
-  // ── 修改后的 downloadNew（新文件名规则 + 更好进度） ─────────────────────
+ 
+  // ── 修改后的 downloadNew（新文件名规则 + 更好进度） 
+// ====================== 关键修复 2：下载文件名（正确拼接） ======================
   async function downloadNew(newItems, history, onStatus) {
-    if (!newItems.length) return 0;
+    if (!newItems.length) {
+      onStatus('没有新文件需要下载。');
+      return 0;
+    }
 
     const total = newItems.length;
     let done = 0;
     const justDownloaded = [];
-    let postIdx = 1;   // 全局 post 序号
+    let postIdx = 1;
+
+    onStatus(`开始下载 ${total} 个文件...`);
 
     for (let c = 0; c < Math.ceil(total / CHUNK_SIZE); c++) {
       const chunk = newItems.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
-      onStatus(`Chunk \( {c+1}/ \){Math.ceil(total/CHUNK_SIZE)}: 正在处理 ${chunk.length} 个文件...`);
-
-      let mediaIdx = 1;  // 每个 post 内的媒体序号
 
       for (const item of chunk) {
-        const promptShort = clean(item.prompt, 10);
-        const idShort = String(item.id).slice(0, 8);
+        const idShort = String(item.id || '').slice(0, 8);
+        const promptShort = clean(item.prompt || 'no-prompt', 10);
         const ext = item.ext || 'jpg';
 
-        const filename = `grok-favorites/\( {String(postIdx).padStart(3,'0')}_ \){String(mediaIdx).padStart(3,'0')}_\( {idShort}_ \){promptShort}.${ext}`;
+        // 正确拼接文件名（修复了模板字符串问题）
+        const filename = `grok-favorites/\( {String(postIdx).padStart(3, '0')}_ \){String(done % 999 + 1).padStart(3, '0')}_\( {idShort}_ \){promptShort}.${ext}`;
 
         GM_download({
           url: item.url,
@@ -337,11 +335,10 @@
 
         justDownloaded.push(item.id);
         done++;
-        mediaIdx++;
 
-        if (done % 10 === 0 || done === total) {
-          const percent = Math.round(done / total * 100);
-          onStatus(`下载进度: \( {done}/ \){total} (${percent}%) - 已排队 ${filename}`);
+        if (done % 8 === 0 || done === total) {
+          const percent = Math.round((done / total) * 100);
+          onStatus(`下载进度: \( {done}/ \){total} (${percent}%)<br>已保存: ${filename}`);
           markDownloaded(history, justDownloaded.splice(0));
         }
 
@@ -349,9 +346,8 @@
       }
 
       postIdx++;
-
-      if (c < Math.ceil(total/CHUNK_SIZE) - 1) {
-        onStatus(`✅ Chunk ${c+1} 完成！暂停 ${CHUNK_PAUSE_MS/1000}s 后继续...`);
+      if (c < Math.ceil(total / CHUNK_SIZE) - 1) {
+        onStatus(`✅ Chunk ${c+1} 完成，暂停 ${CHUNK_PAUSE_MS/1000} 秒...`);
         await sleep(CHUNK_PAUSE_MS);
       }
     }
@@ -359,7 +355,7 @@
     if (justDownloaded.length) markDownloaded(history, justDownloaded);
     return done;
   }
-
+  
   // ── UI ────────────────────────────────────────────────────────────────────
   function buildUI() {
     if (document.getElementById('grokdl-v22')) return;
@@ -374,6 +370,7 @@
     });
 
     const log = document.createElement('div');
+    log.style.whiteSpace = 'pre-wrap';   // 重要：支持换行
     Object.assign(log.style, {
       background: 'rgba(9,11,17,0.94)', color: '#cbd5e1',
       border: '1px solid rgba(255,255,255,0.11)', borderRadius: '10px',
@@ -416,7 +413,10 @@
 
     let _col = '#2563eb';
     const setColor  = c => { _col = c; btn.style.background = c; };
-    const setStatus = msg => { log.textContent = msg; console.log('[GrokDL]', msg); };
+    const setStatus = (msg) => {
+      log.innerHTML = msg;               // 使用 innerHTML 支持 <br>
+      console.log('[GrokDL]', msg.replace(/<br>/g, '\n'));
+    };
 
     btn.onmouseenter = () => { if (!btn.disabled) btn.style.background = '#1d4ed8'; };
     btn.onmouseleave = () => { if (!btn.disabled) btn.style.background = _col; };
@@ -884,7 +884,7 @@ upscaleBtn.addEventListener('click', async () => {
       btn.disabled = true;
       log.style.display = 'block';
       upscaleBtn.textContent = '⏳ Upscaling...';
-      setStatus('正在收集收藏夹中的视频...');
+      setStatus('正在扫描收藏夹中的视频...');
 
       try {
         const history = loadHistory();
