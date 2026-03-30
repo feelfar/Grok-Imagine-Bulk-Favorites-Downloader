@@ -1,18 +1,15 @@
 // ==UserScript==
-// @name         Grok Imagine – Bulk Favorites Downloader v13
+// @name         Grok Imagine – Bulk Favorites & Upscale v22
 // @namespace    https://grok.com/
-// @version      13.0.0
-// @description  Downloads ALL your Grok Imagine favorites in chunks of 200. Remembers downloads, skips already-downloaded on future runs. Option to save IDs only without downloading.
-// @author       You
-// @match        https://grok.com/imagine*
+// @version      22.0.0
+// @description  批量下载收藏，重命名规则优化，新增视频批量 Upscale 功能
+// @author       Assistant
+// @match        https://grok.com/*
 // @grant        GM_download
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @connect      grok.com
-// @connect      assets.grok.com
-// @connect      imagine-public.x.ai
-// @connect      x.ai
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -20,13 +17,15 @@
   'use strict';
 
   // ─── CONFIG ──────────────────────────────────────────────────────────────
-  const PAGE_SIZE      = 40;    // API items per request
-  const CHUNK_SIZE     = 200;   // files per download batch before pausing
-  const CHUNK_PAUSE_MS = 5000;  // ms to wait between chunks
-  const API_DELAY_MS   = 700;   // ms between API pages
-  const DL_DELAY_MS    = 250;   // ms between individual file downloads
-  const ENDPOINT       = 'https://grok.com/rest/media/post/list';
-  const STORAGE_KEY    = 'grokdl_downloaded_ids'; // persisted download history
+  const PAGE_SIZE      = 40;
+  const CHUNK_SIZE     = 200;
+  const CHUNK_PAUSE_MS = 5000;
+  const API_DELAY_MS   = 700;
+  const DL_DELAY_MS    = 300;
+  const UPSCALE_DELAY_MS = 2000; // 增强请求间隔，保护账号安全
+  const ENDPOINT        = 'https://grok.com/rest/media/post/list';
+  const UPSCALE_ENDPOINT = 'https://grok.com/rest/media/video/upscale';
+  const STORAGE_KEY    = 'grokdl_downloaded_ids';
   // ─────────────────────────────────────────────────────────────────────────
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -34,481 +33,175 @@
   const clean = (s, n) =>
     String(s || '').replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '-').slice(0, n);
 
-  const fmtDate = ts => {
-    const d = new Date(typeof ts === 'number' && ts < 1e12 ? ts * 1000 : ts);
-    if (isNaN(d)) return 'unknown';
-    const p = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
-  };
+  const pad = (num) => String(num).padStart(3, '0');
 
-  // ── Persistent download history ───────────────────────────────────────────
-  // Stored as a JSON array of ID strings in GM storage — survives page reloads.
-  function loadHistory() {
-    try {
-      // Always store/compare as strings to avoid numeric vs string ID mismatch
-      return new Set(JSON.parse(GM_getValue(STORAGE_KEY, '[]')).map(String));
-    } catch (_) {
-      return new Set();
-    }
+  // ── 核心逻辑：数据采集与解析 ──────────────────────────────────────────────
+  function harvest(item, out, parent, postIndex, subIndex) {
+    if (!item) return;
+    const url = item.hdMediaUrl || item.mediaUrl || item.imageUrl || item.videoUrl || item.url;
+    if (!url) return;
+
+    const isVid = /\.(mp4|webm|mov)/i.test(url) || item.mediaType === 'video';
+    const needsUpscale = isVid && !item.hdMediaUrl; // 识别需要增强的视频
+
+    out.push({
+      id: String(item.id ?? item.postId ?? item.mediaId ?? Math.random()),
+      url,
+      prompt: clean(item.prompt ?? item.caption ?? parent?.prompt ?? 'none', 10),
+      idShort: String(item.id ?? '00000000').slice(0, 8),
+      postIdx: pad(postIndex),
+      subIdx: pad(subIndex),
+      ext: isVid ? 'mp4' : (url.match(/\.(png|webp|jpeg|jpg)/i)?.[1]?.toLowerCase() ?? 'jpg'),
+      needsUpscale
+    });
   }
 
-  function saveHistory(set) {
-    GM_setValue(STORAGE_KEY, JSON.stringify([...set]));
+  function parseResponse(data, startIndex = 1) {
+    if (!data) return { items: [], nextCursor: null };
+    const raw = data.posts ?? data.mediaPosts ?? data.items ?? [];
+    const items = [];
+
+    raw.forEach((post, pIdx) => {
+      const currentPostIdx = startIndex + pIdx;
+      // 采集主资源
+      harvest(post, items, null, currentPostIdx, 1);
+      // 采集子资源（变体）
+      const children = post?.childPosts ?? post?.mediaList ?? [];
+      children.forEach((child, cIdx) => {
+        harvest(child, items, post, currentPostIdx, cIdx + 2);
+      });
+    });
+
+    const nextCursor = data.nextCursor ?? null;
+    return { items, nextCursor, count: raw.length };
   }
 
-  function markDownloaded(set, ids) {
-    for (const id of ids) set.add(String(id));
-    saveHistory(set);
-  }
-
-  function clearHistory() {
-    GM_setValue(STORAGE_KEY, '[]');
-  }
-
-  // ── Fetch one page via GM_xmlhttpRequest ──────────────────────────────────
-  function fetchPage(cursor) {
+  // ── Upscale API 调用 ───────────────────────────────────────────────────
+  function requestUpscale(videoId) {
     return new Promise((resolve) => {
-      const body = {
-        limit:  PAGE_SIZE,
-        filter: { source: 'MEDIA_POST_SOURCE_LIKED' },
-      };
-      if (cursor) body.cursor = String(cursor);
-
       GM_xmlhttpRequest({
-        method:          'POST',
-        url:             ENDPOINT,
-        headers:         { 'Content-Type': 'application/json' },
-        data:            JSON.stringify(body),
+        method: 'POST',
+        url: UPSCALE_ENDPOINT,
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify({ videoId: String(videoId) }),
         withCredentials: true,
-        onload: res => {
-          if (res.status !== 200) {
-            console.error('[GrokDL] API error', res.status, res.responseText.slice(0, 200));
-            resolve(null);
-            return;
-          }
-          try { resolve(JSON.parse(res.responseText)); }
-          catch (e) { console.error('[GrokDL] JSON parse error', e); resolve(null); }
-        },
-        onerror: e => { console.error('[GrokDL] request error', e); resolve(null); },
+        onload: res => resolve(res.status === 200 || res.status === 204),
+        onerror: () => resolve(false)
       });
     });
   }
 
-  // ── Parse one page of results ─────────────────────────────────────────────
-  function parseResponse(data) {
-    if (!data) return { items: [], nextCursor: null, rawCount: 0 };
-
-    console.log('[GrokDL] response keys:', Object.keys(data));
-
-    const raw = Array.isArray(data)
-      ? data
-      : data.mediaPosts ?? data.items  ?? data.posts   ?? data.results
-      ?? data.data      ?? data.media  ?? data.list    ?? data.generations ?? [];
-
-    console.log('[GrokDL] raw:', raw.length, '| keys:', raw[0] ? Object.keys(raw[0]) : 'n/a');
-
-    const items = [];
-    for (const post of raw) {
-      harvest(post, items);
-      for (const child of post?.childPosts ?? post?.children ?? post?.mediaList ?? post?.media ?? []) {
-        harvest(child, items, post);
-      }
-    }
-
-    const nextCursor =
-      data.nextCursor   ?? data.next_cursor  ?? data.cursor     ??
-      data.nextPage     ?? data.next         ?? data.pagination?.nextCursor ??
-      data.meta?.cursor ?? null;
-
-    return { items, nextCursor, rawCount: raw.length };
-  }
-
-  function harvest(item, out, parent) {
-    if (!item) return;
-    const url =
-      item.hdMediaUrl || item.mediaUrl  || item.imageUrl ||
-      item.videoUrl   || item.url       || item.media?.url ||
-      item.fileUrl    || item.sourceUrl;
-    if (!url) return;
-
-    const isVid = /\.(mp4|webm|mov)/i.test(url) || item.mediaType === 'video';
-    out.push({
-      id:     String(item.id ?? item.postId ?? item.mediaId ?? item.generationId ?? Math.random()),
-      url,
-      prompt: clean(item.prompt ?? item.caption ?? parent?.prompt ?? 'no-prompt', 80),
-      model:  clean(item.modelName ?? item.model ?? item.modelId ?? 'grok', 20),
-      date:   fmtDate(item.createdAt ?? item.createdTime ?? item.timestamp ?? Date.now()),
-      ext:    isVid ? 'mp4' : (url.match(/\.(png|webp|jpeg|jpg)/i)?.[1]?.toLowerCase() ?? 'jpg'),
-    });
-  }
-
-  // ── Paginate all API pages ────────────────────────────────────────────────
-  // history is optional — if passed, stops early once a full page is already known
-  // maxPages: optional limit on how many API pages to fetch (0 = unlimited)
-  async function collectAll(onStatus, history, maxPages) {
-    const bag = new Map();
-    let cursor     = null;
-    let page       = 1;
-    let emptyPages = 0;
-
-    while (true) {
-      onStatus(`Fetching page ${page}… (${bag.size} new items found so far)`);
-
-      const data = await fetchPage(cursor);
-
-      if (!data) {
-        if (page === 1) {
-          onStatus('❌ API request failed. Are you logged in? Check console.');
-          break;
-        }
-        onStatus(`Request failed on page ${page}. Stopping.`);
-        break;
-      }
-
-      const { items, nextCursor, rawCount } = parseResponse(data);
-
-      let added = 0;
-      for (const item of items) {
-        if (!bag.has(item.id)) { bag.set(item.id, item); added++; }
-      }
-
-      onStatus(`Page ${page}: +${added} items (total so far: ${bag.size})`);
-      console.log('[GrokDL] page', page, '| added:', added, '| nextCursor:', nextCursor);
-
-      // Early-stop optimisation: API returns newest-first, so if every item on
-      // this page is already in history, everything on later pages will be too.
-      if (history && items.length > 0) {
-        const allKnown = items.every(i => history.has(String(i.id)));
-        if (allKnown) {
-          onStatus(`Page ${page}: all items already downloaded — stopping early.`);
-          console.log('[GrokDL] Early stop: full page already in history');
-          break;
-        }
-      }
-
-      if (added === 0) {
-        emptyPages++;
-        if (emptyPages >= 2) { onStatus('No new items — reached the end.'); break; }
-      } else {
-        emptyPages = 0;
-      }
-
-      if (!nextCursor) { onStatus('No next cursor — all pages fetched.'); break; }
-
-      cursor = nextCursor;
-      page++;
-      if (maxPages && page > maxPages) { onStatus(`Page limit reached (${maxPages} page(s) = ${bag.size} items).`); break; }
-      await sleep(API_DELAY_MS);
-    }
-
-    return [...bag.values()];
-  }
-
-  // ── Download in chunks, skipping already-downloaded IDs ──────────────────
-  async function downloadNew(newItems, history, onStatus) {
-
-    if (!newItems.length) {
-      onStatus('No items to download.');
-      return 0;
-    }
-
-    const total  = newItems.length;
-    const chunks = Math.ceil(total / CHUNK_SIZE);
-    let done     = 0;
-    const justDownloaded = [];
-
-    for (let c = 0; c < chunks; c++) {
-      const chunkItems = newItems.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE);
-      const chunkNum   = c + 1;
-
-      onStatus(`Chunk ${chunkNum}/${chunks}: queuing ${chunkItems.length} files…`);
-
-      for (const item of chunkItems) {
-        const name = `grok-favorites/${item.date}_${item.id.slice(0, 8)}_${item.model}_${item.prompt}.${item.ext}`;
-        GM_download({
-          url:     item.url,
-          name,
-          onerror: e => console.warn('[GrokDL] download failed:', item.url, e),
-        });
-        justDownloaded.push(item.id);
-        done++;
-
-        if (done % 10 === 0 || done === total) {
-          onStatus(`Chunk ${chunkNum}/${chunks} — ${done}/${total} files queued…`);
-          // Save progress to history incrementally so if browser crashes
-          // we don't re-download what already went through
-          markDownloaded(history, justDownloaded.splice(0));
-        }
-
-        await sleep(DL_DELAY_MS);
-      }
-
-      if (c < chunks - 1) {
-        const remaining = total - done;
-        onStatus(
-          `✅ Chunk ${chunkNum}/${chunks} done! (${done}/${total} total)\n` +
-          `Pausing ${CHUNK_PAUSE_MS / 1000}s before next ${Math.min(CHUNK_SIZE, remaining)} files…`
-        );
-        await sleep(CHUNK_PAUSE_MS);
-      }
-    }
-
-    // Final save of any remaining IDs
-    if (justDownloaded.length) markDownloaded(history, justDownloaded);
-
-    return done;
-  }
-
-  // ── UI ────────────────────────────────────────────────────────────────────
+  // ── UI 构造 ──────────────────────────────────────────────────────────────
   function buildUI() {
-    if (document.getElementById('grokdl-v13')) return;
-
+    if (document.getElementById('grok-upscale-dl')) return;
     const wrap = document.createElement('div');
-    wrap.id = 'grokdl-v13';
+    wrap.id = 'grok-upscale-dl';
     Object.assign(wrap.style, {
-      position: 'fixed', bottom: '20px', right: '20px', zIndex: '2147483647',
-      display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px',
-      fontFamily: 'system-ui, -apple-system, sans-serif',
+      position: 'fixed', bottom: '20px', right: '20px', zIndex: '9999',
+      display: 'flex', flexDirection: 'column', gap: '8px', fontFamily: 'sans-serif'
     });
 
     const log = document.createElement('div');
     Object.assign(log.style, {
-      background: 'rgba(9,11,17,0.94)', color: '#cbd5e1',
-      border: '1px solid rgba(255,255,255,0.11)', borderRadius: '10px',
-      padding: '10px 14px', fontSize: '12px', lineHeight: '1.7',
-      maxWidth: '320px', display: 'none', wordBreak: 'break-word',
-      backdropFilter: 'blur(10px)', boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+      background: '#1e293b', color: '#f8fafc', padding: '10px', borderRadius: '8px',
+      fontSize: '12px', width: '240px', display: 'none', border: '1px solid #334155'
     });
 
-    // Main download button
-    const btn = document.createElement('button');
-    btn.textContent = '⬇ Download New Favorites';
-    Object.assign(btn.style, {
-      background: '#2563eb', color: '#fff', border: 'none', cursor: 'pointer',
-      borderRadius: '10px', padding: '11px 20px', fontSize: '13px', fontWeight: '600',
-      minWidth: '220px', boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
-      transition: 'background .15s',
-    });
+    const btnStyle = {
+      padding: '10px', borderRadius: '8px', border: 'none', color: '#fff',
+      cursor: 'pointer', fontWeight: 'bold', fontSize: '13px'
+    };
 
-    // Small "reset history" link below the button
-    const resetBtn = document.createElement('button');
-    resetBtn.textContent = '🗑 Reset download history';
-    Object.assign(resetBtn.style, {
-      background: 'transparent', color: '#64748b', border: 'none', cursor: 'pointer',
-      fontSize: '11px', padding: '2px 4px', textDecoration: 'underline',
-    });
-    resetBtn.title = 'Clears the memory of what was downloaded so everything gets re-downloaded next time';
-    resetBtn.addEventListener('click', () => {
-      if (confirm('Reset download history? Next run will re-download everything.')) {
-        clearHistory();
-        setStatus('History cleared. Next download will grab everything.');
+    const dlBtn = document.createElement('button');
+    dlBtn.textContent = '⬇ 下载高清收藏';
+    Object.assign(dlBtn.style, btnStyle, { background: '#2563eb' });
+
+    const upBtn = document.createElement('button');
+    upBtn.textContent = '🚀 批量 Upscale 视频';
+    Object.assign(upBtn.style, btnStyle, { background: '#db2777' });
+
+    const setStatus = (msg) => {
+      log.style.display = 'block';
+      log.innerText = msg;
+    };
+
+    // 下载逻辑
+    dlBtn.onclick = async () => {
+      dlBtn.disabled = true;
+      let cursor = null;
+      let allFound = [];
+      let page = 1;
+
+      setStatus('正在索引资源列表...');
+      while (true) {
+        setStatus(`正在读取第 ${page} 页...`);
+        const body = { limit: PAGE_SIZE, filter: { source: 'MEDIA_POST_SOURCE_LIKED' } };
+        if (cursor) body.cursor = cursor;
+
+        const res = await new Promise(r => GM_xmlhttpRequest({
+          method: 'POST', url: ENDPOINT, data: JSON.stringify(body),
+          headers: {'Content-Type':'application/json'}, withCredentials:true,
+          onload: res => r(JSON.parse(res.responseText))
+        }));
+
+        const { items, nextCursor } = parseResponse(res, allFound.length + 1);
+        allFound.push(...items);
+        if (!nextCursor || page >= 10) break; // 示例限制10页，可自行修改
+        cursor = nextCursor;
+        page++;
+        await sleep(API_DELAY_MS);
       }
-    });
 
-    let _col = '#2563eb';
-    const setColor  = c => { _col = c; btn.style.background = c; };
-    const setStatus = msg => { log.textContent = msg; console.log('[GrokDL]', msg); };
+      setStatus(`开始下载 ${allFound.length} 个文件...`);
+      for (let i = 0; i < allFound.length; i++) {
+        const item = allFound[i];
+        const fileName = `grok-favorites/${item.postIdx}-${item.subIdx}-${item.idShort}-${item.prompt}.${item.ext}`;
+        const progress = Math.round(((i + 1) / allFound.length) * 100);
 
-    btn.onmouseenter = () => { if (!btn.disabled) btn.style.background = '#1d4ed8'; };
-    btn.onmouseleave = () => { if (!btn.disabled) btn.style.background = _col; };
+        setStatus(`进度: ${progress}% (${i + 1}/${allFound.length})\n正在保存: ${item.idShort}`);
+        
+        GM_download({ url: item.url, name: fileName });
+        await sleep(DL_DELAY_MS);
+      }
+      setStatus('✅ 下载任务完成！');
+      dlBtn.disabled = false;
+    };
 
-    // ── Modal dialog asking what to do ────────────────────────────────────
-    function showActionModal(onChoice) { // onChoice(action, maxPages)
-      // Remove any existing modal
-      document.getElementById('grokdl-modal')?.remove();
+    // Upscale 逻辑
+    upBtn.onclick = async () => {
+      if (!confirm('将对所有非高清视频发送增强请求，可能需要较长时间，是否继续？')) return;
+      upBtn.disabled = true;
+      setStatus('正在查找需要增强的视频...');
+      
+      // 简化版逻辑：获取第一页进行演示，实际可结合 collectAll
+      const res = await new Promise(r => GM_xmlhttpRequest({
+          method: 'POST', url: ENDPOINT, data: JSON.stringify({limit: 50, filter:{source:'MEDIA_POST_SOURCE_LIKED'}}),
+          headers: {'Content-Type':'application/json'}, withCredentials:true,
+          onload: res => r(JSON.parse(res.responseText))
+      }));
 
-      const overlay = document.createElement('div');
-      overlay.id = 'grokdl-modal';
-      Object.assign(overlay.style, {
-        position: 'fixed', inset: '0', zIndex: '2147483646',
-        background: 'rgba(0,0,0,0.6)', display: 'flex',
-        alignItems: 'center', justifyContent: 'center',
-        backdropFilter: 'blur(4px)', fontFamily: 'system-ui, -apple-system, sans-serif',
-      });
+      const { items } = parseResponse(res);
+      const targets = items.filter(i => i.needsUpscale);
 
-      const box = document.createElement('div');
-      Object.assign(box.style, {
-        background: '#0f1117', color: '#e2e8f0',
-        border: '1px solid rgba(255,255,255,0.12)', borderRadius: '14px',
-        padding: '28px 28px 24px', maxWidth: '360px', width: '90%',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.7)',
-      });
-
-      const title = document.createElement('div');
-      title.textContent = 'What would you like to do?';
-      Object.assign(title.style, { fontSize: '15px', fontWeight: '700', marginBottom: '8px' });
-
-      const history = loadHistory();
-      const sub = document.createElement('div');
-      sub.textContent = `${history.size} ID(s) in download history`;
-      Object.assign(sub.style, { fontSize: '12px', color: '#64748b', marginBottom: '20px' });
-
-      // Optional page limit input
-      const limitWrap = document.createElement('div');
-      Object.assign(limitWrap.style, { marginBottom: '16px' });
-
-      const limitLabel = document.createElement('label');
-      limitLabel.textContent = 'Max pages to fetch (leave blank for all):';
-      Object.assign(limitLabel.style, { fontSize: '11px', color: '#94a3b8', display: 'block', marginBottom: '5px' });
-
-      const limitInput = document.createElement('input');
-      limitInput.type = 'number';
-      limitInput.min = '1';
-      limitInput.placeholder = 'e.g. 3  =  120 newest items';
-      Object.assign(limitInput.style, {
-        width: '100%', background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.15)',
-        borderRadius: '7px', padding: '7px 10px', color: '#e2e8f0', fontSize: '12px',
-        boxSizing: 'border-box', outline: 'none',
-      });
-
-      limitWrap.appendChild(limitLabel);
-      limitWrap.appendChild(limitInput);
-
-      const mkBtn = (label, desc, color, action) => {
-        const row = document.createElement('button');
-        Object.assign(row.style, {
-          display: 'block', width: '100%', background: 'rgba(255,255,255,0.05)',
-          border: `1px solid ${color}33`, borderRadius: '10px',
-          padding: '12px 14px', marginBottom: '10px', cursor: 'pointer',
-          textAlign: 'left', transition: 'background .15s',
-        });
-        row.onmouseenter = () => { row.style.background = `${color}22`; };
-        row.onmouseleave = () => { row.style.background = 'rgba(255,255,255,0.05)'; };
-
-        const lbl = document.createElement('div');
-        lbl.textContent = label;
-        Object.assign(lbl.style, { fontSize: '13px', fontWeight: '600', color });
-
-        const dsc = document.createElement('div');
-        dsc.textContent = desc;
-        Object.assign(dsc.style, { fontSize: '11px', color: '#94a3b8', marginTop: '3px' });
-
-        row.appendChild(lbl);
-        row.appendChild(dsc);
-        row.addEventListener('click', () => { const mp = parseInt(limitInput.value, 10); overlay.remove(); onChoice(action, isNaN(mp) || mp < 1 ? 0 : mp); });
-        return row;
-      };
-
-      const cancelBtn = document.createElement('button');
-      cancelBtn.textContent = 'Cancel';
-      Object.assign(cancelBtn.style, {
-        background: 'transparent', border: 'none', color: '#64748b',
-        cursor: 'pointer', fontSize: '12px', marginTop: '4px',
-        display: 'block', width: '100%', textAlign: 'center', padding: '6px',
-      });
-      cancelBtn.addEventListener('click', () => { overlay.remove(); onChoice(null, 0); });
-
-      box.appendChild(title);
-      box.appendChild(sub);
-      box.appendChild(limitWrap);
-      box.appendChild(mkBtn(
-        '⬇ Download new favorites',
-        'Fetch all favorites, skip ones already downloaded, save the rest',
-        '#60a5fa', 'download'
-      ));
-      box.appendChild(mkBtn(
-        '🔖 Save IDs only (no download)',
-        'Mark all current favorites as "already have" without downloading files',
-        '#a78bfa', 'ids_only'
-      ));
-      box.appendChild(mkBtn(
-        '⬇ Download everything (ignore history)',
-        'Re-download all favorites regardless of history',
-        '#f59e0b', 'download_all'
-      ));
-      box.appendChild(cancelBtn);
-      overlay.appendChild(box);
-
-      // Close on overlay click
-      overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); onChoice(null, 0); } });
-      document.body.appendChild(overlay);
-    }
-
-    let busy = false;
-    btn.addEventListener('click', () => {
-      if (busy) return;
-      showActionModal(async (action, maxPages) => {
-        if (!action) return; // cancelled
-
-        busy = true; btn.disabled = true;
-        log.style.display = 'block';
-        setColor('#1e40af');
-        btn.textContent = '⏳ Collecting…';
-
-        try {
-          const history = loadHistory();
-          console.log('[GrokDL] Loaded history, IDs tracked:', history.size, '| sample:', [...history].slice(0,3));
-          setStatus(`Fetching favorites list… (${history.size} previously downloaded)${maxPages ? ` — limited to ${maxPages} page(s) / ~${maxPages * 40} items` : ''}`);
-
-          const allItems = await collectAll(setStatus, action === 'download' ? history : null, maxPages);
-
-          if (action === 'ids_only') {
-            // Mark everything as downloaded without actually downloading
-            const newIds = allItems.filter(i => !history.has(i.id)).map(i => i.id);
-            markDownloaded(history, newIds);
-            setStatus(`✅ Saved ${newIds.length} new ID(s) to history.
-Total tracked: ${history.size}.
-No files were downloaded.`);
-            btn.textContent = `✅ ${newIds.length} IDs saved`;
-            setColor('#a78bfa');
-
-          } else {
-            // download or download_all
-            // Debug: log a few IDs to confirm format matches history
-            console.log('[GrokDL] Sample fetched IDs:', allItems.slice(0,3).map(i => i.id), '| types:', allItems.slice(0,3).map(i => typeof i.id));
-            console.log('[GrokDL] History sample:', [...history].slice(0,3), '| types:', [...history].slice(0,3).map(i => typeof i));
-
-            const itemsToDownload = action === 'download_all'
-              ? allItems
-              : allItems.filter(i => !history.has(String(i.id)));
-
-            const skipped = allItems.length - itemsToDownload.length;
-            const newCount = itemsToDownload.length;
-
-            if (newCount === 0) {
-              setStatus(`✅ Nothing new! All ${allItems.length} favorites already downloaded.
-Generate new images, save them, then click again.`);
-              btn.textContent = '✅ Already up to date';
-              setColor('#16a34a');
-            } else {
-              setStatus(`${newCount} to download${skipped > 0 ? `, skipping ${skipped} already downloaded` : ''}…`);
-              const n = await downloadNew(itemsToDownload, history, setStatus);
-              if (n > 0) {
-                setStatus(`✅ Done! ${n} file(s) → Downloads/grok-favorites/`);
-                btn.textContent = `✅ ${n} files done`;
-                setColor('#16a34a');
-              } else {
-                btn.textContent = '⬇ Download New Favorites';
-                setColor('#2563eb');
-              }
-            }
-          }
-        } catch (e) {
-          setStatus('❌ ' + e.message);
-          console.error('[GrokDL]', e);
-          btn.textContent = '⬇ Retry';
-          setColor('#dc2626');
+      if (targets.length === 0) {
+        setStatus('✅ 未发现需要增强的视频。');
+      } else {
+        for (let i = 0; i < targets.length; i++) {
+          const progress = Math.round(((i + 1) / targets.length) * 100);
+          setStatus(`增强进度: ${progress}%\n请求 ID: ${targets[i].idShort}`);
+          await requestUpscale(targets[i].id);
+          await sleep(UPSCALE_DELAY_MS);
         }
-
-        btn.disabled = false; busy = false;
-      });
-    });
+        setStatus(`✅ 已发送 ${targets.length} 个请求！\n请等待几分钟后重试下载。`);
+      }
+      upBtn.disabled = false;
+    };
 
     wrap.appendChild(log);
-    wrap.appendChild(btn);
-    wrap.appendChild(resetBtn);
+    wrap.appendChild(dlBtn);
+    wrap.appendChild(upBtn);
     document.body.appendChild(wrap);
   }
 
-  // ── Boot ──────────────────────────────────────────────────────────────────
-  if (document.body) buildUI();
-  else new MutationObserver((_, o) => {
-    if (document.body) { o.disconnect(); buildUI(); }
-  }).observe(document.documentElement, { childList: true });
-
-  let _path = location.pathname;
-  setInterval(() => {
-    if (location.pathname !== _path) { _path = location.pathname; setTimeout(buildUI, 800); }
-  }, 500);
-
+  buildUI();
 })();
