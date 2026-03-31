@@ -24,8 +24,8 @@
     const PAGE_SIZE = 40;
     const CHUNK_SIZE = 200;
     const CHUNK_PAUSE_MS = 5000;
-    const API_DELAY_MS = 700;
-    const DL_DELAY_MS = 250;
+    const API_DELAY_MS = 1000;
+    const DL_DELAY_MS = 800;
     const UPSCALE_DELAY_MS = 1000; // 1s between upscale requests
 
     const ENDPOINT = 'https://grok.com/rest/media/post/list';
