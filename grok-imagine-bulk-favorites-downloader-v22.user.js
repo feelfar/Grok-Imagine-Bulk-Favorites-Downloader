@@ -26,7 +26,7 @@
     const CHUNK_PAUSE_MS = 5000;
     const API_DELAY_MS = 1000;
     const DL_DELAY_MS = 800;
-    const UPSCALE_DELAY_MS = 1000; // 1s between upscale requests
+    const UPSCALE_DELAY_MS = 200; // 1s between upscale requests
 
     const ENDPOINT = 'https://grok.com/rest/media/post/list';
     const FOLDER_ENDPOINT = 'https://grok.com/rest/media/folder/list';
@@ -284,7 +284,7 @@
             const v = videosToUpscale[i];
             onStatus(`🔼 Upscaling video ${i+1}/${videosToUpscale.length} (ID: ${v.id})...`);
 
-            new Promise(resolve => {
+            await new Promise(resolve => {
                 GM_xmlhttpRequest({
                     method: 'POST',
                     url: UPSCALE_ENDPOINT,
