@@ -284,7 +284,7 @@
             const v = videosToUpscale[i];
             onStatus(`🔼 Upscaling video ${i+1}/${videosToUpscale.length} (ID: ${v.id})...`);
 
-            await new Promise(resolve => {
+            new Promise(resolve => {
                 GM_xmlhttpRequest({
                     method: 'POST',
                     url: UPSCALE_ENDPOINT,
