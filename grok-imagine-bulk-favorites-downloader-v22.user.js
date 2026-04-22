@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Grok Imagine – Bulk Favorites Downloader v22
 // @namespace    https://grok.com/
-// @version      22.1.0
+// @version      22.2.0
 // @description  Bulk download favorites + bulk upscale videos without hdMediaUrl + improved naming + better progress
 // @author       You
 // @match        https://grok.com/*
@@ -113,155 +113,108 @@
     function parseResponse(data, page = 1, shallowOnly = false) {
         if (!data) return { items: [], nextCursor: null, rawCount: 0 };
 
-        console.log(`[GrokDL] Page ${page} response keys:`, Object.keys(data));
-
-        const raw = Array.isArray(data)
-            ? data
-            : data.posts      ?? data.mediaPosts ?? data.items  ?? data.results
-            ?? data.data      ?? data.media      ?? data.list    ?? data.generations ?? [];
-
-        console.log(`[GrokDL] Page ${page} raw items:`, raw.length);
+        const raw = Array.isArray(data) ? data : data.posts ?? data.mediaPosts ?? data.items ?? data.results ?? data.data ?? data.media ?? data.list ?? data.generations ?? [];
 
         const items = [];
         let postIdx = 1;
 
         for (const post of raw) {
-            // 主帖
-            harvest(post, items, null, page, postIdx, 0);
+            // 忽略原post项，只从 images 和 videos 取
+            const allMedia = [...(post.images ?? []), ...(post.videos ?? [])];
 
-            if (!shallowOnly) {
-                // 子项（childPosts / children / media 等）
-                const children = post?.childPosts ?? post?.children ?? post?.mediaList ?? post?.media ?? [];
-                let childIdx = 1;
-                for (const child of children) {
-                    harvest(child, items, post, page, postIdx, childIdx);
-                    childIdx++;
+            // 取生成时间最早的项作为 postID（主帖ID）
+            let postID = post.id;
+            let earliestTime = Infinity;
+            for (const m of allMedia) {
+                const t = new Date(m.createTime || m.createdAt || m.createdTime || 0).getTime();
+                if (t > 0 && t < earliestTime) {
+                    earliestTime = t;
+                    postID = m.id;  // 或保持 post.id，根据实际优先用最早media的id
                 }
+            }
+
+            let childIdx = 1;
+            for (const child of allMedia) {
+                harvest(child, items, post, page, postIdx, childIdx);
+                // 覆盖id为 postID（主帖最早id）
+                if (items.length) {
+                    const last = items[items.length - 1];
+                    last.postID = String(postID);  // 新增字段用于文件名
+                }
+                childIdx++;
             }
             postIdx++;
         }
 
-        const nextCursor =
-              data.nextCursor   ?? data.next_cursor  ?? data.cursor     ??
-              data.nextPage     ?? data.next         ?? data.pagination?.nextCursor ??
-              data.meta?.cursor ?? null;
+        const nextCursor = data.nextCursor ?? data.next_cursor ?? data.cursor ?? data.nextPage ?? data.next ?? data.pagination?.nextCursor ?? data.meta?.cursor ?? null;
 
         return { items, nextCursor, rawCount: raw.length };
     }
-
     // ── Harvest single item ───────────────────────────────────────────────────
     function harvest(item, out, parent, page = 1, postIdx = 1, childIdx = 0) {
         if (!item) return;
 
-        const url =
-              item.hdMediaUrl || item.mediaUrl  || item.imageUrl ||
-              item.videoUrl   || item.url       || item.media?.url ||
-              item.fileUrl    || item.sourceUrl;
-
+        const url = item.hdMediaUrl || item.mediaUrl || item.imageUrl || item.videoUrl || item.url || item.media?.url || item.fileUrl || item.sourceUrl;
         if (!url) return;
 
         const isVid = /\.(mp4|webm|mov)/i.test(url) || item.mediaType === 'video';
-        const lowresvid = isVid && !item.hdMediaUrl && !item.hdUrl;   // 低分辨率视频需要 upscale
+        const lowresvid = isVid && !item.hdMediaUrl && !item.hdUrl && item.resolutionName === "480p";   // 低分辨率视频需要 upscale
 
         out.push({
-            id:        String(item.id ?? item.postId ?? item.mediaId ?? item.generationId ?? Math.random()),
+            id: String(item.id ?? item.postId ?? item.mediaId ?? item.generationId ?? Math.random()),
             url,
-            prompt:    clean(item.prompt ?? item.caption ?? parent?.prompt ?? 'no-prompt', 80),
-            model:     clean(item.modelName ?? item.model ?? item.modelId ?? 'grok', 20),
-            date:      fmtDate(item.createdAt ?? item.createdTime ?? item.timestamp ?? Date.now()),
-            ext:       isVid ? 'mp4' : (url.match(/\.(png|webp|jpeg|jpg)/i)?.[1]?.toLowerCase() ?? 'jpg'),
-
-            // 新增字段
-            page:      page,
-            postIdx:   postIdx,
-            childIdx:  childIdx,
-            lowresvid: lowresvid
+            prompt: clean(item.prompt ?? item.caption ?? parent?.prompt ?? 'no-prompt', 80),
+            model: clean(item.modelName ?? item.model ?? item.modelId ?? 'grok', 20),
+            date: fmtDate(item.createdAt ?? item.createTime ?? item.createdTime ?? item.timestamp ?? Date.now()),
+            ext: isVid ? 'mp4' : (url.match(/\.(png|webp|jpeg|jpg)/i)?.[1]?.toLowerCase() ?? 'jpg'),
+            page: page,
+            postIdx: postIdx,
+            childIdx: childIdx,
+            lowresvid: lowresvid,
+            // 新增用于文件名和CSV
+            childId: String(item.id),
+            createTime: item.createTime || item.createdAt || item.createdTime
         });
     }
 
-    // ── Paginate all API pages ────────────────────────────────────────────────
-    async function collectAll(onStatus, history, maxPages, folderId, shallowOnly = false) {
-        const MAX_PASSES   = folderId ? 3 : 1;
-        const PAGE_RETRIES = 3;
-        const RETRY_DELAY  = 1500;
-
+// ── Collect all pages（无最大分页限制，直接循环到无nextCursor） ─────────────
+    async function collectAll(onStatus, history, folderId, shallowOnly = false) {
         const bag = new Map();
+        let cursor = null;
+        let page = 1;
+        let emptyPages = 0;
 
-        for (let pass = 1; pass <= MAX_PASSES; pass++) {
-            const bagSizeBefore = bag.size;
-            let cursor = null;
-            let page   = 1;
-            let emptyPages = 0;
+        while (true) {
+            onStatus(`Fetching page ${page}… (${bag.size} items found so far)`);
 
-            if (folderId && pass > 1) {
-                onStatus(`Pass ${pass}/${MAX_PASSES}: re-scanning... (${bag.size} found so far)`);
-                await sleep(1000);
+            let data = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                data = await fetchPage(cursor, folderId);
+                if (data) break;
+                await sleep(1500);
+            }
+            if (!data) break;
+
+            const { items, nextCursor } = parseResponse(data, page, shallowOnly);
+
+            for (const item of items) {
+                if (!bag.has(item.id)) bag.set(item.id, item);
             }
 
-            while (true) {
-                onStatus(`${folderId && MAX_PASSES > 1 ? `Pass ${pass} · ` : ''}Fetching page ${page}… (${bag.size} items found so far)`);
+            onStatus(`Page ${page}: +${items.length} new (${bag.size} total)`);
 
-                let data = null;
-                for (let attempt = 1; attempt <= PAGE_RETRIES; attempt++) {
-                    data = await fetchPage(cursor, folderId);
-                    if (!data) {
-                        if (page === 1 && attempt === PAGE_RETRIES) {
-                            onStatus('❌ API request failed. Are you logged in?');
-                            return [...bag.values()];
-                        }
-                        onStatus(`Page ${page} failed (attempt ${attempt}), retrying…`);
-                        await sleep(RETRY_DELAY);
-                        continue;
-                    }
-
-                    const { items } = parseResponse(data, page, shallowOnly);   // ← 传入 page
-                    if (items.length === 0 && attempt < PAGE_RETRIES) {
-                        await sleep(RETRY_DELAY);
-                        data = null;
-                        continue;
-                    }
-                    break;
-                }
-
-                if (!data) break;
-
-                const { items, nextCursor } = parseResponse(data, page, shallowOnly);   // ← 传入 page
-
-                let added = 0;
-                for (const item of items) {
-                    if (!bag.has(item.id)) {
-                        bag.set(item.id, item);
-                        added++;
-                    }
-                }
-
-                onStatus(`Page ${page}: +${added} new (${bag.size} total)`);
-
-                if (history && items.length > 0) {
-                    const allKnown = items.every(i => history.has(String(i.id)));
-                    if (allKnown) {
-                        onStatus(`Page ${page}: all items already downloaded — stopping early.`);
-                        break;
-                    }
-                }
-
-                if (items.length === 0) {
-                    emptyPages++;
-                    if (emptyPages >= 2) break;
-                } else {
-                    emptyPages = 0;
-                }
-
-                if (!nextCursor) break;
-
-                cursor = nextCursor;
-                page++;
-                if (maxPages && page > maxPages) break;
-
-                await sleep(API_DELAY_MS);
+            if (items.length === 0) {
+                emptyPages++;
+                if (emptyPages >= 2) break;
+            } else {
+                emptyPages = 0;
             }
 
-            if (folderId && bag.size === bagSizeBefore && pass > 1) break;
+            if (!nextCursor) break;
+
+            cursor = nextCursor;
+            page++;
+            await sleep(1000);
         }
 
         return [...bag.values()];
@@ -316,47 +269,40 @@
         return success;
     }
 
-    // ── Download with new naming rule ────────────────────────────────────────
+    // ── Download with new filename rule ───────────────────────────────────────
     async function downloadNew(newItems, history, onStatus) {
-        if (!newItems.length) {
-            onStatus('No items to download.');
-            return 0;
-        }
+        if (!newItems.length) return 0;
 
-        const total = newItems.length;
+        const csvRows = [["filename", "childId", "prompt"]];
         let done = 0;
-        const justDownloaded = [];
 
-        for (let i = 0; i < total; i++) {
-            const item = newItems[i];
+        for (const item of newItems) {
+            const postID8 = String(item.postID || item.id).slice(0, 8);
+            const dt = new Date(item.createTime || Date.now());
+            const date8 = dt.getFullYear().toString().slice(-2) + String(dt.getMonth()+1).padStart(2,'0') + String(dt.getDate()).padStart(2,'0');
+            const time6 = String(dt.getHours()).padStart(2,'0') + String(dt.getMinutes()).padStart(2,'0') + String(dt.getSeconds()).padStart(2,'0');
+            const childID8 = String(item.childId || item.id).slice(0, 8);
 
-            const pageStr    = String(item.page     || 1).padStart(3, '0');
-            const postIdxStr = String(item.postIdx  || 1).padStart(3, '0');
-            const childIdxStr= String(item.childIdx || 0).padStart(3, '0');
-            const idShort    = String(item.id).slice(0, 8);
-            const promptShort= clean(item.prompt, 10);
+            const name = `${postID8}_${date8}_${time6}_${childID8}.${item.ext}`;
 
-            const name = `grok_${pageStr}_${postIdxStr}_${childIdxStr}_${idShort}_${promptShort}.${item.ext}`;
+            csvRows.push([name, item.childId || item.id, item.prompt]);
 
-            onStatus(`Downloading ${i+1}/${total} → ${name}`);
+            onStatus(`Downloading ${++done}/${newItems.length} → ${name}`);
 
-            GM_download({
-                url: item.url,
-                name,
-                onerror: e => console.warn('[GrokDL] download failed:', item.url, e),
-            });
+            GM_download({ url: item.url, name });
 
-            justDownloaded.push(item.id);
-            done++;
-
-            if (done % 10 === 0 || done === total) {
-                markDownloaded(history, justDownloaded.splice(0));
-            }
-
-            await sleep(DL_DELAY_MS);
+            await sleep(800);
         }
 
-        if (justDownloaded.length) markDownloaded(history, justDownloaded);
+        // 生成CSV
+        const csvContent = csvRows.map(row => row.map(c => `"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'grok_download_list.csv';
+        link.click();
+
+        if (history) markDownloaded(history, newItems.map(i => i.id));
         return done;
     }
     // ── UI (新增 Upscale 按钮 + 改进进度) ───────────────────────────────────
